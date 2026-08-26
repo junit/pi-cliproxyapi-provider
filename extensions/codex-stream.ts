@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { ProtocolMode } from "./lib.ts";
 
 export const CLIPROXYAPI_CODEX_API = "cliproxyapi-codex-responses" as const;
 
@@ -291,4 +292,108 @@ export async function loadCliproxyCodexStreams(
 		streamSimple,
 		stream: mod.stream,
 	};
+}
+
+export function patchResponsesSource(source: string, providerIds: string[]): string {
+	const providersMatch = source.match(/const OPENAI_TOOL_CALL_PROVIDERS = new Set\(\[([^\]]*)\]\);/);
+	if (!providersMatch) {
+		throw new Error("openai-responses source no longer defines OPENAI_TOOL_CALL_PROVIDERS");
+	}
+	const existing = providersMatch[1];
+	const extras = providerIds
+		.filter((id) => id.trim())
+		.map((id) => JSON.stringify(id.trim()))
+		.join(", ");
+	let src = source.replace(
+		/const OPENAI_TOOL_CALL_PROVIDERS = new Set\(\[([^\]]*)\]\);/,
+		`const OPENAI_TOOL_CALL_PROVIDERS = new Set([${existing}${extras ? `, ${extras}` : ""}]);`,
+	);
+	src = src.replace(/^\/\/# sourceMappingURL=.*$/gm, "");
+	return src;
+}
+
+function resolveOriginalResponsesModulePath(): { path: string; dir: string } {
+	const candidates: string[] = [];
+
+	try {
+		const subpath = import.meta.resolve("@earendil-works/pi-ai/api/openai-responses");
+		candidates.push(fileURLToPath(subpath));
+	} catch {
+		// ignore and try filesystem candidates
+	}
+
+	try {
+		const main = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"));
+		const distDir = dirname(main);
+		candidates.push(join(distDir, "api/openai-responses.js"));
+		candidates.push(join(distDir, "openai-responses.js"));
+	} catch {
+		// ignore
+	}
+
+	if (process.argv[1]) {
+		try {
+			const require = createRequire(pathToFileURL(realpathSync(process.argv[1])));
+			for (const nodeModulesDir of require.resolve.paths("@earendil-works/pi-ai") ?? []) {
+				const candidate = join(nodeModulesDir, "@earendil-works", "pi-ai", "dist", "api", "openai-responses.js");
+				if (existsSync(candidate)) {
+					candidates.push(candidate);
+				}
+			}
+		} catch {
+			// Ignore invalid or unavailable runtime entrypoints.
+		}
+	}
+
+	for (const path of candidates) {
+		if (path && existsSync(path)) {
+			return { path, dir: dirname(path) };
+		}
+	}
+
+	throw new Error(`Cannot resolve openai-responses.js (tried: ${candidates.join(", ") || "none"})`);
+}
+
+export async function loadCliproxyResponsesStreams(
+	providerIds: string[] = ["cliproxyapi"],
+	options: CliproxyCodexStreamOptions = {},
+): Promise<CliproxyCodexStreams> {
+	const { path: originalPath, dir: originalDir } = resolveOriginalResponsesModulePath();
+	const originalSource = readFileSync(originalPath, "utf8");
+	const patched = rewriteRelativeImports(patchResponsesSource(originalSource, providerIds), originalDir);
+
+	const hash = createHash("sha1").update(patched).digest("hex").slice(0, 16);
+	const cacheDir = join(tmpdir(), "pi-cliproxyapi-provider");
+	mkdirSync(cacheDir, { recursive: true });
+	const outPath = join(cacheDir, `openai-responses-cpa-${hash}.mjs`);
+	if (!existsSync(outPath)) {
+		writeFileSync(outPath, patched, "utf8");
+	}
+
+	const mod = (await import(pathToFileURL(outPath).href)) as {
+		streamSimple: CliproxyCodexStreamSimple;
+		stream: CliproxyCodexStreamSimple;
+	};
+
+	if (typeof mod.streamSimple !== "function" || typeof mod.stream !== "function") {
+		throw new Error("patched openai-responses module missing streamSimple/stream exports");
+	}
+
+	const streamSimple = wrapStreamSimpleForFast(mod.streamSimple, options.shouldUseFast);
+
+	return {
+		api: CLIPROXYAPI_CODEX_API,
+		streamSimple,
+		stream: mod.stream,
+	};
+}
+
+export function detectProtocolFromBaseUrl(baseUrl: string | undefined): ProtocolMode {
+	if (!baseUrl) return "openai-codex";
+	try {
+		const path = new URL(baseUrl).pathname.replace(/\/+$/, "");
+		return path === "/v1" || path.endsWith("/v1") ? "openai-responses" : "openai-codex";
+	} catch {
+		return "openai-codex";
+	}
 }

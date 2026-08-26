@@ -21,7 +21,13 @@
 import type { Api, Model, OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { ProactiveCompactionController } from "./auto-compact.ts";
-import { CLIPROXYAPI_CODEX_API, type CliproxyCodexStreamSimple, loadCliproxyCodexStreams } from "./codex-stream.ts";
+import {
+	CLIPROXYAPI_CODEX_API,
+	type CliproxyCodexStreamSimple,
+	detectProtocolFromBaseUrl,
+	loadCliproxyCodexStreams,
+	loadCliproxyResponsesStreams,
+} from "./codex-stream.ts";
 import { FastModeController } from "./fast.ts";
 import { FastFooterController } from "./fast-footer.ts";
 import {
@@ -41,6 +47,7 @@ import {
 	resolveIdentity,
 	resolveMappedModels,
 	resolvePauseDefault,
+	resolveProtocol,
 	saveConfigFile,
 } from "./lib.ts";
 import type { PauseController } from "./pause.ts";
@@ -308,7 +315,8 @@ function createOAuthHandlers(options: {
 				return models;
 			}
 			try {
-				const { inferenceBaseUrl } = resolveEndpoints(meta.baseUrl);
+				const proto = resolveProtocol(agentDir, meta.baseUrl);
+				const { inferenceBaseUrl } = resolveEndpoints(meta.baseUrl, proto);
 				return models.map((model) =>
 					model.provider === providerId ? { ...model, baseUrl: inferenceBaseUrl } : model,
 				);
@@ -349,7 +357,8 @@ function registerProvider(
 	} = options;
 	const refreshCoordinator = options.refreshCoordinator ?? new ModelRefreshCoordinator();
 
-	const endpoints = resolveEndpoints(baseUrlInput);
+	const proto = resolveProtocol(agentDir, baseUrlInput);
+	const endpoints = resolveEndpoints(baseUrlInput, proto);
 	const oauth = createOAuthHandlers({
 		pi,
 		agentDir,
@@ -621,17 +630,40 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	const fastMode = new FastModeController(fastEnabled);
 	const modelRefreshCoordinator = new ModelRefreshCoordinator();
 
-	let streamSimple: CliproxyCodexStreamSimple;
+	let codexStreamSimple: CliproxyCodexStreamSimple | undefined;
+	let responsesStreamSimple: CliproxyCodexStreamSimple | undefined;
+
 	try {
-		const streams = await loadCliproxyCodexStreams([identity.providerId, "cliproxyapi"], {
+		const codexStreams = await loadCliproxyCodexStreams([identity.providerId, "cliproxyapi"], {
 			shouldUseFast: (model) => model.provider === identity.providerId && fastMode.isEffectiveFor(model.id),
 		});
-		streamSimple = proactiveCompaction.wrapStreamSimple(streams.streamSimple);
+		codexStreamSimple = proactiveCompaction.wrapStreamSimple(codexStreams.streamSimple);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		logWarn(`failed to load patched codex protocol: ${message}`);
 		return;
 	}
+
+	try {
+		const responsesStreams = await loadCliproxyResponsesStreams([identity.providerId, "cliproxyapi"], {
+			shouldUseFast: (model) => model.provider === identity.providerId && fastMode.isEffectiveFor(model.id),
+		});
+		responsesStreamSimple = proactiveCompaction.wrapStreamSimple(responsesStreams.streamSimple);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		logWarn(`openai-responses protocol unavailable: ${message}`);
+		// Non-fatal: codex-only mode continues to work
+	}
+
+	const codexSS = codexStreamSimple;
+	const responsesSS = responsesStreamSimple;
+
+	const streamSimple: CliproxyCodexStreamSimple = (model, context, options) => {
+		if (responsesSS && detectProtocolFromBaseUrl(model.baseUrl) === "openai-responses") {
+			return responsesSS(model, context, options);
+		}
+		return codexSS(model, context, options);
+	};
 
 	const fastFooter = new FastFooterController(identity.providerId, fastMode, () =>
 		proactiveCompaction.getCompactionSettings(),

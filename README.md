@@ -99,6 +99,7 @@ Optional fields:
 | `providerName` | `CLIProxyAPI` | Display name in `/login` and UI |
 | `fast` | `false` | Persisted Fast mode preference; only applies to catalog-supported models |
 | `pause` | `false` | Persisted request-pause preference; provider requests wait until it is cleared |
+| `protocol` | auto-detected | Protocol mode (`"openai-codex"` or `"openai-responses"`) |
 
 ### Environment overrides
 
@@ -109,6 +110,7 @@ Optional fields:
 | `CLIPROXYAPI_PROVIDER_ID` | `providerId` |
 | `CLIPROXYAPI_PROVIDER_NAME` | `providerName` |
 | `CLIPROXYAPI_FAST` | `fast` (`true` / `false`, also accepts `1`, `0`, `yes`, `no`, `on`, `off`) |
+| `CLIPROXYAPI_PROTOCOL` | `protocol` (`openai-codex` or `openai-responses`) |
 
 Resolution order for connection settings:
 
@@ -119,18 +121,19 @@ Resolution order for connection settings:
 
 The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.json` → `false`.
 
-### baseUrl normalization
+### Protocol modes & baseUrl normalization
 
-Preferred form is **host:port only**:
+The plugin supports dual protocols for official accounts and third-party relay APIs:
 
-| Input | Inference baseUrl | Models URL |
-| ------- | ------------------- | ------------ |
-| `http://127.0.0.1:8317` | `http://127.0.0.1:8317/backend-api/` | `http://127.0.0.1:8317/v1/models?client_version=pi` |
-| `http://127.0.0.1:8317/backend-api` | `http://127.0.0.1:8317/backend-api/` | same models URL |
-| `http://127.0.0.1:8317/v1` | `http://127.0.0.1:8317/backend-api/` | same models URL |
-| `127.0.0.1:8317` | `http://127.0.0.1:8317/backend-api/` | same models URL |
+- **`openai-codex`** (default for `host:port` or `/backend-api`): Uses patched ChatGPT Codex backend protocol (`/backend-api/codex/responses`) with WebSocket and SSE fallback.
+- **`openai-responses`** (auto-detected for URLs ending in `/v1`): Uses standard OpenAI Responses API protocol (`/v1/responses`) over HTTP SSE. Ideal for third-party proxy/relay stations that do not support WebSocket or Codex proprietary endpoints.
 
-pi then sends inference traffic to `{inference}/codex/responses`.
+| Input / Mode | Protocol | Inference baseUrl | Models URL |
+| ------- | --------- | ------------------- | ------------ |
+| `http://127.0.0.1:8317` | `openai-codex` | `http://127.0.0.1:8317/backend-api/` | `http://127.0.0.1:8317/v1/models?client_version=pi` |
+| `http://127.0.0.1:8317/backend-api` | `openai-codex` | `http://127.0.0.1:8317/backend-api/` | same models URL |
+| `http://relay.api/v1` | `openai-responses` | `http://relay.api/v1/` | `http://relay.api/v1/models?client_version=pi` |
+| `127.0.0.1:8317` | `openai-codex` | `http://127.0.0.1:8317/backend-api/` | same models URL |
 
 ## Fast mode
 
