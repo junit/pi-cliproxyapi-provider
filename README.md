@@ -123,10 +123,10 @@ The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.j
 
 ### Protocol modes & baseUrl normalization
 
-The plugin supports dual protocols for official accounts and third-party relay APIs:
+The plugin supports two downstream protocols. For a local CLIProxyAPI instance, `openai-codex` keeps Pi's WebSocket transport while CLIProxyAPI selects the credential and independently chooses that credential's upstream WebSocket or HTTP executor. Direct third-party relay endpoints can use `openai-responses` when they only expose the standard `/v1/responses` API.
 
-- **`openai-codex`** (default for `host:port` or `/backend-api`): Uses patched ChatGPT Codex backend protocol (`/backend-api/codex/responses`) with WebSocket and SSE fallback.
-- **`openai-responses`** (auto-detected for URLs ending in `/v1`): Uses standard OpenAI Responses API protocol (`/v1/responses`) over HTTP SSE. Ideal for third-party proxy/relay stations that do not support WebSocket or Codex proprietary endpoints.
+- **`openai-codex`** (default for `host:port` or `/backend-api`): Uses the CLIProxyAPI Codex backend protocol (`/backend-api/codex/responses`) with WebSocket and Codex SSE fallback. A downstream WebSocket does not require every selected upstream credential to support WebSocket; CLIProxyAPI performs per-credential transport selection.
+- **`openai-responses`** (auto-detected for URLs ending in `/v1`): Uses the standard OpenAI Responses API protocol (`/v1/responses`) over HTTP SSE. Use it for direct relay endpoints or an explicit operator override, not as a model-wide capability cache for a mixed CLIProxyAPI pool.
 
 | Input / Mode | Protocol | Inference baseUrl | Models URL |
 | ------- | --------- | ------------------- | ------------ |
