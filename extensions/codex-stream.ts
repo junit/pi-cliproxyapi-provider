@@ -204,13 +204,48 @@ export function patchCodexSource(source: string, providerIds: string[]): string 
 	return src;
 }
 
-export function resolveCodexModuleFromNodeEntry(entryPath: string): string | undefined {
+const PI_AI_PACKAGE_VARIANTS = [
+	join("@earendil-works", "pi-ai"),
+	join("@earendil-works", "pi-coding-agent", "node_modules", "@earendil-works", "pi-ai"),
+	join("@earendil-works", "pi", "node_modules", "@earendil-works", "pi-ai"),
+	join("@mariozechner", "pi-ai"),
+	join("@mariozechner", "pi-coding-agent", "node_modules", "@mariozechner", "pi-ai"),
+	join("@mariozechner", "pi", "node_modules", "@mariozechner", "pi-ai"),
+];
+
+const PI_AI_FILE_VARIANTS = (fileName: string): string[] => [
+	join("dist", "api", fileName),
+	join("api", fileName),
+	join("dist", fileName),
+	fileName,
+];
+
+export function resolveCodexModuleFromNodeEntry(
+	entryPath: string,
+	fileName = "openai-codex-responses.js",
+): string | undefined {
 	try {
-		const require = createRequire(pathToFileURL(realpathSync(entryPath)));
-		for (const nodeModulesDir of require.resolve.paths("@earendil-works/pi-ai") ?? []) {
-			const candidate = join(nodeModulesDir, "@earendil-works", "pi-ai", "dist", "api", "openai-codex-responses.js");
-			if (existsSync(candidate)) {
-				return candidate;
+		const real = realpathSync(entryPath);
+		const require = createRequire(pathToFileURL(real));
+		const searchPaths = require.resolve.paths("@earendil-works/pi-ai") ?? [];
+
+		let cur = dirname(real);
+		for (let i = 0; i < 6; i++) {
+			searchPaths.push(cur, join(cur, "node_modules"));
+			const parent = dirname(cur);
+			if (parent === cur) break;
+			cur = parent;
+		}
+
+		const relativeFiles = PI_AI_FILE_VARIANTS(fileName);
+		for (const basePath of searchPaths) {
+			for (const pkg of PI_AI_PACKAGE_VARIANTS) {
+				for (const rel of relativeFiles) {
+					const candidate = join(basePath, pkg, rel);
+					if (existsSync(candidate)) {
+						return candidate;
+					}
+				}
 			}
 		}
 	} catch {
@@ -219,45 +254,119 @@ export function resolveCodexModuleFromNodeEntry(entryPath: string): string | und
 	return undefined;
 }
 
-function resolveOriginalCodexModulePath(): { path: string; dir: string } {
-	// Under pi's extension loader, `@earendil-works/pi-ai` may resolve to dist/compat.js
-	// and package subpath resolve for `/api/*` can fail. Prefer locating the physical
-	// dist file next to the resolved package entry.
-	const candidates: string[] = [];
-
+export function resolvePhysicalPiAiModule(fileName: string): { path: string; dir: string } {
+	// 1. Try native import.meta.resolve subpath & package main
 	try {
-		const subpath = import.meta.resolve("@earendil-works/pi-ai/api/openai-codex-responses");
-		candidates.push(fileURLToPath(subpath));
+		const subpath = import.meta.resolve(`@earendil-works/pi-ai/api/${fileName}`);
+		const subpathFile = fileURLToPath(subpath);
+		if (existsSync(subpathFile)) {
+			return { path: subpathFile, dir: dirname(subpathFile) };
+		}
 	} catch {
-		// ignore and try filesystem candidates
+		// ignore
 	}
 
 	try {
 		const main = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"));
 		const distDir = dirname(main);
-		candidates.push(join(distDir, "api/openai-codex-responses.js"));
-		candidates.push(join(distDir, "openai-codex-responses.js"));
+		for (const rel of [join("api", fileName), fileName]) {
+			const candidate = join(distDir, rel);
+			if (existsSync(candidate)) {
+				return { path: candidate, dir: dirname(candidate) };
+			}
+		}
 	} catch {
 		// ignore
 	}
 
-	// pi 0.84.3's bundled Node CLI exposes pi-ai as a virtual module to
-	// extensions. Resolve its physical nested dependency from the CLI entry so
-	// the source-patching transport can still read the installed implementation.
+	// 2. Build comprehensive search roots from process entry, cwd, execPath, homedir
+	const searchRoots = new Set<string>();
+
+	// Process entrypoint (e.g. pi CLI entry point)
 	if (process.argv[1]) {
-		const bundledHostModule = resolveCodexModuleFromNodeEntry(process.argv[1]);
-		if (bundledHostModule) {
-			candidates.push(bundledHostModule);
+		try {
+			const candidate = resolveCodexModuleFromNodeEntry(process.argv[1], fileName);
+			if (candidate && existsSync(candidate)) {
+				return { path: candidate, dir: dirname(candidate) };
+			}
+			const real = realpathSync(process.argv[1]);
+			let cur = dirname(real);
+			for (let i = 0; i < 6; i++) {
+				searchRoots.add(cur);
+				searchRoots.add(join(cur, "node_modules"));
+				const parent = dirname(cur);
+				if (parent === cur) break;
+				cur = parent;
+			}
+		} catch {
+			// ignore
 		}
 	}
 
-	for (const path of candidates) {
-		if (path && existsSync(path)) {
-			return { path, dir: dirname(path) };
+	// Node executable path (e.g. ~/.nvm/versions/node/vX.Y.Z/bin/node -> ../lib/node_modules)
+	try {
+		const execDir = dirname(process.execPath);
+		searchRoots.add(execDir);
+		searchRoots.add(join(execDir, "..", "lib", "node_modules"));
+		searchRoots.add(join(execDir, "..", "node_modules"));
+	} catch {
+		// ignore
+	}
+
+	// Module directory from import.meta.url
+	try {
+		let cur = dirname(fileURLToPath(import.meta.url));
+		for (let i = 0; i < 6; i++) {
+			searchRoots.add(cur);
+			searchRoots.add(join(cur, "node_modules"));
+			const parent = dirname(cur);
+			if (parent === cur) break;
+			cur = parent;
+		}
+	} catch {
+		// ignore
+	}
+
+	// Current working directory
+	try {
+		searchRoots.add(process.cwd());
+		searchRoots.add(join(process.cwd(), "node_modules"));
+	} catch {
+		// ignore
+	}
+
+	// User plugin / agent directories
+	const home = process.env.HOME || process.env.USERPROFILE;
+	if (home) {
+		searchRoots.add(join(home, ".pi", "agent", "npm", "node_modules"));
+		searchRoots.add(join(home, ".omp", "plugins", "node_modules"));
+		searchRoots.add(join(home, ".bun", "install", "cache"));
+		searchRoots.add(join(home, ".npm"));
+	}
+
+	// Common global install locations
+	searchRoots.add("/usr/local/lib/node_modules");
+	searchRoots.add("/opt/homebrew/lib/node_modules");
+
+	// Probe all combinations
+	const relativeFiles = PI_AI_FILE_VARIANTS(fileName);
+	for (const root of searchRoots) {
+		for (const pkg of PI_AI_PACKAGE_VARIANTS) {
+			for (const rel of relativeFiles) {
+				const candidate = join(root, pkg, rel);
+				if (existsSync(candidate)) {
+					return { path: candidate, dir: dirname(candidate) };
+				}
+			}
 		}
 	}
 
-	throw new Error(`Cannot resolve openai-codex-responses.js (tried: ${candidates.join(", ") || "none"})`);
+	const rootsSample = Array.from(searchRoots).slice(0, 10).join(", ");
+	throw new Error(`Cannot resolve ${fileName} (scanned roots: ${rootsSample || "none"})`);
+}
+
+function resolveOriginalCodexModulePath(): { path: string; dir: string } {
+	return resolvePhysicalPiAiModule("openai-codex-responses.js");
 }
 
 export async function loadCliproxyCodexStreams(
@@ -313,45 +422,7 @@ export function patchResponsesSource(source: string, providerIds: string[]): str
 }
 
 function resolveOriginalResponsesModulePath(): { path: string; dir: string } {
-	const candidates: string[] = [];
-
-	try {
-		const subpath = import.meta.resolve("@earendil-works/pi-ai/api/openai-responses");
-		candidates.push(fileURLToPath(subpath));
-	} catch {
-		// ignore and try filesystem candidates
-	}
-
-	try {
-		const main = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"));
-		const distDir = dirname(main);
-		candidates.push(join(distDir, "api/openai-responses.js"));
-		candidates.push(join(distDir, "openai-responses.js"));
-	} catch {
-		// ignore
-	}
-
-	if (process.argv[1]) {
-		try {
-			const require = createRequire(pathToFileURL(realpathSync(process.argv[1])));
-			for (const nodeModulesDir of require.resolve.paths("@earendil-works/pi-ai") ?? []) {
-				const candidate = join(nodeModulesDir, "@earendil-works", "pi-ai", "dist", "api", "openai-responses.js");
-				if (existsSync(candidate)) {
-					candidates.push(candidate);
-				}
-			}
-		} catch {
-			// Ignore invalid or unavailable runtime entrypoints.
-		}
-	}
-
-	for (const path of candidates) {
-		if (path && existsSync(path)) {
-			return { path, dir: dirname(path) };
-		}
-	}
-
-	throw new Error(`Cannot resolve openai-responses.js (tried: ${candidates.join(", ") || "none"})`);
+	return resolvePhysicalPiAiModule("openai-responses.js");
 }
 
 export async function loadCliproxyResponsesStreams(

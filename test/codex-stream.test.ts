@@ -5,6 +5,7 @@ import {
 	loadCliproxyCodexStreams,
 	loadCliproxyResponsesStreams,
 	patchResponsesSource,
+	resolvePhysicalPiAiModule,
 	withPriorityServiceTier,
 } from "../extensions/codex-stream.ts";
 
@@ -101,5 +102,27 @@ describe("runtime module loading", () => {
 
 		dispatcher({ baseUrl: "http://127.0.0.1:8317/backend-api/" });
 		expect(lastUsed).toBe("codex");
+	});
+});
+
+describe("resolvePhysicalPiAiModule", () => {
+	it("resolves physical openai-codex-responses.js file", () => {
+		const resolved = resolvePhysicalPiAiModule("openai-codex-responses.js");
+		expect(resolved).toBeDefined();
+		expect(resolved.path).toContain("openai-codex-responses.js");
+		expect(resolved.dir).toBeDefined();
+	});
+
+	it("resolves physical openai-responses.js file", () => {
+		const resolved = resolvePhysicalPiAiModule("openai-responses.js");
+		expect(resolved).toBeDefined();
+		expect(resolved.path).toContain("openai-responses.js");
+		expect(resolved.dir).toBeDefined();
+	});
+
+	it("throws with descriptive message when module cannot be found", () => {
+		expect(() => resolvePhysicalPiAiModule("non-existent-module-xyz.js")).toThrow(
+			/Cannot resolve non-existent-module-xyz\.js/,
+		);
 	});
 });
