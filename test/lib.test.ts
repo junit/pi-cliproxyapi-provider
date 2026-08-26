@@ -232,6 +232,29 @@ describe("model mapping helpers", () => {
 		expect(model?.contextWindow).toBe(DEFAULT_CONTEXT_WINDOW);
 		expect(model?.reasoning).toBe(false);
 	});
+
+	it("derives maxTokens from max_tokens, max_output_tokens, and max_completion_tokens", () => {
+		const m1 = toPiModel({ id: "claude-sonnet-5", max_tokens: 128000 });
+		expect(m1?.maxTokens).toBe(128000);
+
+		const m2 = toPiModel({ id: "gemini-2.5-pro", max_output_tokens: 65536 });
+		expect(m2?.maxTokens).toBe(65536);
+
+		const m3 = toPiModel({ id: "gpt-5-mini", max_completion_tokens: 32768 });
+		expect(m3?.maxTokens).toBe(32768);
+
+		// Priority order: max_tokens > max_output_tokens > max_completion_tokens
+		const m4 = toPiModel({ id: "custom-model", max_tokens: 128000, max_output_tokens: 64000 });
+		expect(m4?.maxTokens).toBe(128000);
+	});
+
+	it("falls back to DEFAULT_MAX_TOKENS when max_tokens is absent or non-positive", () => {
+		expect(toPiModel({ id: "m1" })?.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+		expect(toPiModel({ id: "m1", max_tokens: 0 })?.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+		expect(toPiModel({ id: "m1", max_tokens: -100 })?.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+		expect(toPiModel({ id: "m1", max_tokens: Number.NaN })?.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+		expect(toPiModel({ id: "m1", max_tokens: Number.POSITIVE_INFINITY })?.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+	});
 });
 
 describe("models.dev cost mapping", () => {

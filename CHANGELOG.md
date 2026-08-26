@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unit Test Coverage**: Added dedicated test suites for runtime stream patching, module resolution, and cache protocol awareness.
 
 ### Fixed
+- **Per-Model Max Output Tokens Resolution**: Derived `maxTokens` dynamically from upstream `max_tokens`, `max_output_tokens`, and `max_completion_tokens` instead of hardcoding `DEFAULT_MAX_TOKENS` (16384), unlocking the full 128K output capabilities of models like Claude Sonnet 5 and Opus. (#11)
 - **OMP Runtime Compatibility**: Resolved `TypeError: settingsManager.reload is not a function` during extension initialization under OMP (`omp/18.0.4`) by supporting async `SettingsManager.create()`, disk reload fallback, and resilient compaction configuration extraction. (#13)
 - **Relay API WebSocket Errors**: Resolved `WebSocket error` and retry failures when connecting to third-party proxy stations that only support HTTP SSE at `/v1/responses`.
 - **Cache Protocol Consistency**: Fixed model cache lookup to be protocol-aware, preventing endpoint collisions between Codex (`/backend-api/`) and Relay API (`/v1/`) modes.

@@ -75,6 +75,9 @@ export interface CodexClientModel {
 	description?: string;
 	context_window?: number;
 	max_context_window?: number;
+	max_tokens?: number;
+	max_output_tokens?: number;
+	max_completion_tokens?: number;
 	input_modalities?: string[];
 	supported_reasoning_levels?: CodexReasoningLevel[] | string[];
 	default_service_tier?: string | null;
@@ -555,6 +558,22 @@ export function toPiModel(
 		? matchModelCost(id, costCatalog, fastMode && supportsFastServiceTier(model))
 		: { ...ZERO_COST };
 
+	const maxTokens =
+		(typeof model.max_tokens === "number" && Number.isFinite(model.max_tokens) && model.max_tokens > 0
+			? model.max_tokens
+			: undefined) ??
+		(typeof model.max_output_tokens === "number" &&
+		Number.isFinite(model.max_output_tokens) &&
+		model.max_output_tokens > 0
+			? model.max_output_tokens
+			: undefined) ??
+		(typeof model.max_completion_tokens === "number" &&
+		Number.isFinite(model.max_completion_tokens) &&
+		model.max_completion_tokens > 0
+			? model.max_completion_tokens
+			: undefined) ??
+		DEFAULT_MAX_TOKENS;
+
 	return {
 		id,
 		name: (model.display_name ?? model.name ?? id).trim() || id,
@@ -562,7 +581,7 @@ export function toPiModel(
 		input: buildInputModalities(model),
 		cost,
 		contextWindow,
-		maxTokens: DEFAULT_MAX_TOKENS,
+		maxTokens,
 		thinkingLevelMap: buildThinkingLevelMap(efforts),
 	};
 }
