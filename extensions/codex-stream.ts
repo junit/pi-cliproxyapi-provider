@@ -14,7 +14,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, isBuiltin } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -93,10 +93,12 @@ const EXTRACT_ACCOUNT_ID_PATCH = `function extractAccountId(token) {
     }
 }`;
 
-function rewriteRelativeImports(source: string, originalDir: string): string {
-	return source.replace(/from\s+"((?:\.\.?\/)[^"]+)"/g, (_full, relPath: string) => {
-		const absolute = pathToFileURL(join(originalDir, relPath)).href;
-		return `from ${JSON.stringify(absolute)}`;
+function rewriteModuleImports(source: string, originalDir: string): string {
+	const require = createRequire(pathToFileURL(join(originalDir, "__pi_ai_resolver__.cjs")));
+	return source.replace(/from\s+(["'])([^"']+)\1/g, (full, _quote: string, specifier: string) => {
+		if (specifier.startsWith("node:") || isBuiltin(specifier)) return full;
+		const resolved = specifier.startsWith(".") ? join(originalDir, specifier) : require.resolve(specifier);
+		return `from ${JSON.stringify(pathToFileURL(resolved).href)}`;
 	});
 }
 
@@ -360,7 +362,7 @@ async function loadPatchedPiAiStreams(options: {
 	const moduleName = fileName.endsWith(".js") ? fileName.slice(0, -3) : fileName;
 	const { path: originalPath, dir: originalDir } = resolvePhysicalPiAiModule(fileName);
 	const originalSource = readFileSync(originalPath, "utf8");
-	const patched = rewriteRelativeImports(patchSource(originalSource, providerIds), originalDir);
+	const patched = rewriteModuleImports(patchSource(originalSource, providerIds), originalDir);
 
 	const hash = createHash("sha1").update(patched).digest("hex").slice(0, 16);
 	const cacheDir = join(tmpdir(), "pi-cliproxyapi-provider");

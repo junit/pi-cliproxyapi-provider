@@ -1,3 +1,8 @@
+import { execFileSync } from "node:child_process";
+import { readdirSync, readFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { Api, Context, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
@@ -81,6 +86,33 @@ describe("runtime module loading", () => {
 		expect(typeof streams.streamSimple).toBe("function");
 		expect(typeof streams.stream).toBe("function");
 		expect(streams.api).toBe("cliproxyapi-codex-responses");
+	});
+
+	it("loads the patched responses module from a standalone Node process", async () => {
+		const marker = `cliproxyapi-standalone-node-test-${process.pid}-${Date.now()}`;
+		await loadCliproxyResponsesStreams([marker]);
+
+		const cacheDir = join(tmpdir(), "pi-cliproxyapi-provider");
+		const generatedPath = readdirSync(cacheDir)
+			.filter((name) => name.startsWith("openai-responses-cpa-") && name.endsWith(".mjs"))
+			.map((name) => join(cacheDir, name))
+			.find((path) => readFileSync(path, "utf8").includes(marker));
+		expect(generatedPath).toBeDefined();
+
+		try {
+			expect(() =>
+				execFileSync(
+					process.execPath,
+					["--input-type=module", "-e", `await import(${JSON.stringify(pathToFileURL(generatedPath!).href)});`],
+					{
+						cwd: tmpdir(),
+						stdio: "pipe",
+					},
+				),
+			).not.toThrow();
+		} finally {
+			if (generatedPath) unlinkSync(generatedPath);
+		}
 	});
 
 	it("applies fast payload hook correctly", async () => {
