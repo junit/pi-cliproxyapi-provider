@@ -334,7 +334,8 @@ export function loadModelsCache(agentDir: string, baseUrlInput: string): ModelsC
 	const cachePath = join(agentDir, MODELS_CACHE_FILE_NAME);
 	try {
 		const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as Partial<ModelsCacheFile>;
-		const endpoints = resolveEndpoints(baseUrlInput);
+		const proto = resolveProtocol(agentDir, baseUrlInput);
+		const endpoints = resolveEndpoints(baseUrlInput, proto);
 		if (
 			typeof parsed.fetchedAt !== "number" ||
 			parsed.modelsUrl !== endpoints.modelsUrl ||
@@ -924,7 +925,8 @@ export async function loadMappedModels(
 	const pricingEnabled = typeof timeoutOrFastMode === "boolean";
 	const effectiveFastMode = typeof timeoutOrFastMode === "boolean" ? timeoutOrFastMode : false;
 	const timeoutMs = typeof timeoutOrFastMode === "number" ? timeoutOrFastMode : MODELS_REQUEST_TIMEOUT_MS;
-	const endpoints = resolveEndpoints(baseUrlInput);
+	const proto = agentDir ? resolveProtocol(agentDir, baseUrlInput) : autoDetectProtocol(baseUrlInput);
+	const endpoints = resolveEndpoints(baseUrlInput, proto);
 	const [remoteModels, costCatalog] = await Promise.all([
 		fetchCodexModels(endpoints.modelsUrl, apiKey, timeoutMs, signal),
 		pricingEnabled ? fetchModelsDevCostMap(agentDir, false, signal) : Promise.resolve(undefined),
