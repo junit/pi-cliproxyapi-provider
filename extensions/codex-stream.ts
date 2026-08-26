@@ -39,6 +39,11 @@ export interface CliproxyCodexStreamOptions {
 	shouldUseFast?: (model: Model<Api>) => boolean;
 }
 
+interface HostPiAiRuntime {
+	buildModel?: (spec: Record<string, unknown>) => Model<Api>;
+	streamSimple?: CliproxyCodexStreamSimple;
+}
+
 type PayloadHook = NonNullable<SimpleStreamOptions["onPayload"]>;
 
 export function withPriorityServiceTier(payload: unknown): unknown {
@@ -75,6 +80,55 @@ export function wrapStreamSimpleForFast(
 			onPayload: (payload, payloadModel) => applyFastPayloadHook(payload, payloadModel, streamOptions?.onPayload),
 		});
 	};
+}
+
+export function createHostCompatibleStreams(
+	host: HostPiAiRuntime,
+	hostApi: "openai-codex-responses" | "openai-responses",
+	options: CliproxyCodexStreamOptions = {},
+): CliproxyCodexStreams | undefined {
+	if (typeof host.streamSimple !== "function" || typeof host.buildModel !== "function") return undefined;
+
+	const buildModel = host.buildModel;
+	const hostStreamSimple = host.streamSimple;
+	const streamSimple: CliproxyCodexStreamSimple = (model, context, streamOptions) => {
+		const {
+			compat: _compat,
+			compatConfig,
+			...modelSpec
+		} = model as Model<Api> & {
+			compat?: unknown;
+			compatConfig?: unknown;
+		};
+		const hostModel = buildModel({
+			...modelSpec,
+			api: hostApi,
+			...(compatConfig === undefined ? {} : { compat: compatConfig }),
+		});
+		return hostStreamSimple(hostModel, context, streamOptions);
+	};
+
+	return {
+		api: CLIPROXYAPI_CODEX_API,
+		streamSimple: wrapStreamSimpleForFast(streamSimple, options.shouldUseFast),
+		stream: streamSimple,
+	};
+}
+
+async function loadHostCompatibleStreams(
+	hostApi: "openai-codex-responses" | "openai-responses",
+	options: CliproxyCodexStreamOptions,
+): Promise<CliproxyCodexStreams | undefined> {
+	try {
+		const host = (await import("@earendil-works/pi-ai")) as HostPiAiRuntime;
+		if (typeof host.streamSimple !== "function") return undefined;
+
+		const catalogSpecifier = "@oh-my-pi/pi-catalog/build";
+		const catalog = (await import(catalogSpecifier)) as Pick<HostPiAiRuntime, "buildModel">;
+		return createHostCompatibleStreams({ ...host, buildModel: catalog.buildModel }, hostApi, options);
+	} catch {
+		return undefined;
+	}
 }
 
 const EXTRACT_ACCOUNT_ID_PATCH = `function extractAccountId(token) {
@@ -354,11 +408,15 @@ export function resolvePhysicalPiAiModule(fileName: string): { path: string; dir
 
 async function loadPatchedPiAiStreams(options: {
 	fileName: string;
+	hostApi: "openai-codex-responses" | "openai-responses";
 	providerIds: string[];
 	streamOptions: CliproxyCodexStreamOptions;
 	patchSource: (source: string, providerIds: string[]) => string;
 }): Promise<CliproxyCodexStreams> {
-	const { fileName, providerIds, streamOptions, patchSource } = options;
+	const { fileName, hostApi, providerIds, streamOptions, patchSource } = options;
+	const hostStreams = await loadHostCompatibleStreams(hostApi, streamOptions);
+	if (hostStreams) return hostStreams;
+
 	const moduleName = fileName.endsWith(".js") ? fileName.slice(0, -3) : fileName;
 	const { path: originalPath, dir: originalDir } = resolvePhysicalPiAiModule(fileName);
 	const originalSource = readFileSync(originalPath, "utf8");
@@ -391,6 +449,7 @@ export async function loadCliproxyCodexStreams(
 ): Promise<CliproxyCodexStreams> {
 	return loadPatchedPiAiStreams({
 		fileName: "openai-codex-responses.js",
+		hostApi: "openai-codex-responses",
 		providerIds,
 		streamOptions: options,
 		patchSource: patchCodexSource,
@@ -421,6 +480,7 @@ export async function loadCliproxyResponsesStreams(
 ): Promise<CliproxyCodexStreams> {
 	return loadPatchedPiAiStreams({
 		fileName: "openai-responses.js",
+		hostApi: "openai-responses",
 		providerIds,
 		streamOptions: options,
 		patchSource: patchResponsesSource,

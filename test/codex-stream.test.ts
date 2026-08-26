@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
 	applyFastPayloadHook,
 	type CliproxyCodexStreamSimple,
+	createHostCompatibleStreams,
 	createProtocolStreamDispatcher,
 	detectProtocolFromBaseUrl,
 	loadCliproxyCodexStreams,
@@ -72,6 +73,35 @@ describe("patchResponsesSource", () => {
 });
 
 describe("runtime module loading", () => {
+	it("uses a compatible host stream without importing a second pi-ai runtime", () => {
+		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		let receivedModel: Model<Api> | undefined;
+		const streams = createHostCompatibleStreams(
+			{
+				buildModel: (spec) => ({ ...spec, compat: { supportsImageDetailOriginal: true } }) as unknown as Model<Api>,
+				streamSimple: (model) => {
+					receivedModel = model;
+					return streamResult;
+				},
+			},
+			"openai-codex-responses",
+		);
+		const model = {
+			...testModel("http://127.0.0.1:8317/backend-api"),
+			api: "cliproxyapi-codex-responses",
+		} as Model<Api>;
+
+		expect(streams?.streamSimple(model, testContext)).toBe(streamResult);
+		expect(receivedModel?.api).toBe("openai-codex-responses");
+		expect(receivedModel?.compat).toEqual({ supportsImageDetailOriginal: true });
+		expect(model.api).toBe("cliproxyapi-codex-responses");
+	});
+
+	it("falls back unless the host exposes both streamSimple and buildModel", () => {
+		expect(createHostCompatibleStreams({}, "openai-responses")).toBeUndefined();
+		expect(createHostCompatibleStreams({ streamSimple: () => ({}) as never }, "openai-responses")).toBeUndefined();
+	});
+
 	it("loads patched codex stream module successfully", async () => {
 		const streams = await loadCliproxyCodexStreams(["cliproxyapi"]);
 		expect(streams).toBeDefined();
