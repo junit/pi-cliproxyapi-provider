@@ -11,6 +11,7 @@ const CLIPROXYAPI_ENV_NAMES = [
 	"CLIPROXYAPI_API_KEY",
 	"CLIPROXYAPI_BASE_URL",
 	"CLIPROXYAPI_FAST",
+	"CLIPROXYAPI_PROTOCOL",
 	"CLIPROXYAPI_PROVIDER_ID",
 	"CLIPROXYAPI_PROVIDER_NAME",
 ] as const;
@@ -207,7 +208,11 @@ describe("pi 0.82.0 compatibility", () => {
 			);
 			writeFileSync(
 				join(agentDir, "cliproxyapi.json"),
-				JSON.stringify({ baseUrl: "http://127.0.0.1:8317", apiKey: "stored-key" }),
+				JSON.stringify({
+					baseUrl: "http://127.0.0.1:8317",
+					apiKey: "stored-key",
+					protocol: "openai-responses",
+				}),
 				"utf8",
 			);
 
@@ -233,6 +238,9 @@ describe("pi 0.82.0 compatibility", () => {
 					"cliproxyapi",
 					expect.objectContaining({
 						oauth: expect.any(Object),
+						headers: {
+							"X-Codex-Beta-Features": "remote_compaction_v2",
+						},
 					}),
 				);
 			} finally {

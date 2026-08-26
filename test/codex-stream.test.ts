@@ -11,6 +11,7 @@ import {
 	createHostCompatibleStreams,
 	createProtocolStreamDispatcher,
 	detectProtocolFromBaseUrl,
+	isOmpRuntimeEntry,
 	loadCliproxyCodexStreams,
 	loadCliproxyResponsesStreams,
 	patchResponsesSource,
@@ -23,6 +24,14 @@ const testContext = { messages: [] } as Context;
 function testModel(baseUrl: string): Model<Api> {
 	return { id: "test", provider: "cliproxyapi", baseUrl } as Model<Api>;
 }
+
+describe("isOmpRuntimeEntry", () => {
+	it("only enables host stream reuse for the OMP package entry", () => {
+		expect(isOmpRuntimeEntry("/opt/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js")).toBe(true);
+		expect(isOmpRuntimeEntry("/opt/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js")).toBe(false);
+		expect(isOmpRuntimeEntry(undefined)).toBe(false);
+	});
+});
 
 describe("detectProtocolFromBaseUrl", () => {
 	it("detects openai-responses from /v1 baseUrl", () => {
