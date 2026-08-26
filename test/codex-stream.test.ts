@@ -1,6 +1,9 @@
+import type { Api, Context, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
 	applyFastPayloadHook,
+	type CliproxyCodexStreamSimple,
+	createProtocolStreamDispatcher,
 	detectProtocolFromBaseUrl,
 	loadCliproxyCodexStreams,
 	loadCliproxyResponsesStreams,
@@ -9,11 +12,18 @@ import {
 	withPriorityServiceTier,
 } from "../extensions/codex-stream.ts";
 
+const testContext = { messages: [] } as Context;
+
+function testModel(baseUrl: string): Model<Api> {
+	return { id: "test", provider: "cliproxyapi", baseUrl } as Model<Api>;
+}
+
 describe("detectProtocolFromBaseUrl", () => {
 	it("detects openai-responses from /v1 baseUrl", () => {
 		expect(detectProtocolFromBaseUrl("http://127.0.0.1:8317/v1")).toBe("openai-responses");
 		expect(detectProtocolFromBaseUrl("http://127.0.0.1:8317/v1/")).toBe("openai-responses");
 		expect(detectProtocolFromBaseUrl("https://relay.proxy.com/api/v1")).toBe("openai-responses");
+		expect(detectProtocolFromBaseUrl("relay.proxy.com:8317/v1")).toBe("openai-responses");
 	});
 
 	it("defaults to openai-codex for non-v1 baseUrl", () => {
@@ -75,33 +85,47 @@ describe("runtime module loading", () => {
 
 	it("applies fast payload hook correctly", async () => {
 		const payload = { model: "gpt-4o" };
-		const next = await applyFastPayloadHook(payload, { id: "gpt-4o", provider: "cliproxyapi" } as any);
+		const model = { id: "gpt-4o", provider: "cliproxyapi" } as Model<Api>;
+		const next = await applyFastPayloadHook(payload, model);
 		expect(next).toEqual({ model: "gpt-4o", service_tier: "priority" });
 	});
 
-	it("dispatches between codex and responses based on baseUrl", () => {
+	it("dispatches between codex and responses through the production dispatcher", () => {
 		let lastUsed = "";
-		const codexSS = () => {
+		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		const codexSS: CliproxyCodexStreamSimple = () => {
 			lastUsed = "codex";
-			return {} as any;
+			return streamResult;
 		};
-		const responsesSS = () => {
+		const responsesSS: CliproxyCodexStreamSimple = () => {
 			lastUsed = "responses";
-			return {} as any;
+			return streamResult;
 		};
+		const dispatcher = createProtocolStreamDispatcher(codexSS, responsesSS);
 
-		const dispatcher = (model: { baseUrl?: string }) => {
-			if (responsesSS && detectProtocolFromBaseUrl(model.baseUrl) === "openai-responses") {
-				return responsesSS();
-			}
-			return codexSS();
-		};
-
-		dispatcher({ baseUrl: "http://127.0.0.1:8317/v1/" });
+		dispatcher(testModel("http://127.0.0.1:8317/v1/"), testContext);
 		expect(lastUsed).toBe("responses");
 
-		dispatcher({ baseUrl: "http://127.0.0.1:8317/backend-api/" });
+		dispatcher(testModel("http://127.0.0.1:8317/backend-api/"), testContext);
 		expect(lastUsed).toBe("codex");
+	});
+
+	it("fails clearly instead of routing responses requests through codex when the responses stream is unavailable", () => {
+		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		const loaderError = new Error("patched source is incompatible");
+		const dispatcher = createProtocolStreamDispatcher(() => streamResult, undefined, loaderError);
+
+		let thrown: unknown;
+		try {
+			dispatcher(testModel("https://relay.example/v1/"), testContext);
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toMatchObject({
+			message: expect.stringMatching(/openai-responses protocol is unavailable.*patched source is incompatible/),
+			cause: loaderError,
+		});
 	});
 });
 

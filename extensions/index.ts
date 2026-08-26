@@ -24,7 +24,7 @@ import { ProactiveCompactionController } from "./auto-compact.ts";
 import {
 	CLIPROXYAPI_CODEX_API,
 	type CliproxyCodexStreamSimple,
-	detectProtocolFromBaseUrl,
+	createProtocolStreamDispatcher,
 	loadCliproxyCodexStreams,
 	loadCliproxyResponsesStreams,
 } from "./codex-stream.ts";
@@ -632,6 +632,7 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 
 	let codexStreamSimple: CliproxyCodexStreamSimple | undefined;
 	let responsesStreamSimple: CliproxyCodexStreamSimple | undefined;
+	let responsesStreamLoadError: unknown;
 
 	try {
 		const codexStreams = await loadCliproxyCodexStreams([identity.providerId, "cliproxyapi"], {
@@ -650,20 +651,16 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 		});
 		responsesStreamSimple = proactiveCompaction.wrapStreamSimple(responsesStreams.streamSimple);
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		logWarn(`openai-responses protocol unavailable: ${message}`);
+		responsesStreamLoadError = error;
+		logWarn(`openai-responses protocol unavailable: ${error instanceof Error ? error.message : String(error)}`);
 		// Non-fatal: codex-only mode continues to work
 	}
 
-	const codexSS = codexStreamSimple;
-	const responsesSS = responsesStreamSimple;
-
-	const streamSimple: CliproxyCodexStreamSimple = (model, context, options) => {
-		if (responsesSS && detectProtocolFromBaseUrl(model.baseUrl) === "openai-responses") {
-			return responsesSS(model, context, options);
-		}
-		return codexSS(model, context, options);
-	};
+	const streamSimple = createProtocolStreamDispatcher(
+		codexStreamSimple,
+		responsesStreamSimple,
+		responsesStreamLoadError,
+	);
 
 	const fastFooter = new FastFooterController(identity.providerId, fastMode, () =>
 		proactiveCompaction.getCompactionSettings(),

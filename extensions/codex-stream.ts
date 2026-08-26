@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import type { ProtocolMode } from "./lib.ts";
+import { autoDetectProtocol, type ProtocolMode } from "./lib.ts";
 
 export const CLIPROXYAPI_CODEX_API = "cliproxyapi-codex-responses" as const;
 
@@ -220,6 +220,31 @@ const PI_AI_FILE_VARIANTS = (fileName: string): string[] => [
 	fileName,
 ];
 
+function collectAncestorModuleRoots(path: string): string[] {
+	const roots: string[] = [];
+	let current = dirname(path);
+	for (let i = 0; i < 6; i++) {
+		roots.push(current, join(current, "node_modules"));
+		const parent = dirname(current);
+		if (parent === current) break;
+		current = parent;
+	}
+	return roots;
+}
+
+function findPiAiModule(searchRoots: Iterable<string>, fileName: string): string | undefined {
+	const relativeFiles = PI_AI_FILE_VARIANTS(fileName);
+	for (const root of searchRoots) {
+		for (const packagePath of PI_AI_PACKAGE_VARIANTS) {
+			for (const relativeFile of relativeFiles) {
+				const candidate = join(root, packagePath, relativeFile);
+				if (existsSync(candidate)) return candidate;
+			}
+		}
+	}
+	return undefined;
+}
+
 export function resolveCodexModuleFromNodeEntry(
 	entryPath: string,
 	fileName = "openai-codex-responses.js",
@@ -227,27 +252,11 @@ export function resolveCodexModuleFromNodeEntry(
 	try {
 		const real = realpathSync(entryPath);
 		const require = createRequire(pathToFileURL(real));
-		const searchPaths = require.resolve.paths("@earendil-works/pi-ai") ?? [];
-
-		let cur = dirname(real);
-		for (let i = 0; i < 6; i++) {
-			searchPaths.push(cur, join(cur, "node_modules"));
-			const parent = dirname(cur);
-			if (parent === cur) break;
-			cur = parent;
-		}
-
-		const relativeFiles = PI_AI_FILE_VARIANTS(fileName);
-		for (const basePath of searchPaths) {
-			for (const pkg of PI_AI_PACKAGE_VARIANTS) {
-				for (const rel of relativeFiles) {
-					const candidate = join(basePath, pkg, rel);
-					if (existsSync(candidate)) {
-						return candidate;
-					}
-				}
-			}
-		}
+		const searchRoots = [
+			...(require.resolve.paths("@earendil-works/pi-ai") ?? []),
+			...collectAncestorModuleRoots(real),
+		];
+		return findPiAiModule(searchRoots, fileName);
 	} catch {
 		// Ignore invalid or unavailable runtime entrypoints.
 	}
@@ -290,14 +299,7 @@ export function resolvePhysicalPiAiModule(fileName: string): { path: string; dir
 				return { path: candidate, dir: dirname(candidate) };
 			}
 			const real = realpathSync(process.argv[1]);
-			let cur = dirname(real);
-			for (let i = 0; i < 6; i++) {
-				searchRoots.add(cur);
-				searchRoots.add(join(cur, "node_modules"));
-				const parent = dirname(cur);
-				if (parent === cur) break;
-				cur = parent;
-			}
+			for (const root of collectAncestorModuleRoots(real)) searchRoots.add(root);
 		} catch {
 			// ignore
 		}
@@ -315,14 +317,7 @@ export function resolvePhysicalPiAiModule(fileName: string): { path: string; dir
 
 	// Module directory from import.meta.url
 	try {
-		let cur = dirname(fileURLToPath(import.meta.url));
-		for (let i = 0; i < 6; i++) {
-			searchRoots.add(cur);
-			searchRoots.add(join(cur, "node_modules"));
-			const parent = dirname(cur);
-			if (parent === cur) break;
-			cur = parent;
-		}
+		for (const root of collectAncestorModuleRoots(fileURLToPath(import.meta.url))) searchRoots.add(root);
 	} catch {
 		// ignore
 	}
@@ -348,59 +343,56 @@ export function resolvePhysicalPiAiModule(fileName: string): { path: string; dir
 	searchRoots.add("/usr/local/lib/node_modules");
 	searchRoots.add("/opt/homebrew/lib/node_modules");
 
-	// Probe all combinations
-	const relativeFiles = PI_AI_FILE_VARIANTS(fileName);
-	for (const root of searchRoots) {
-		for (const pkg of PI_AI_PACKAGE_VARIANTS) {
-			for (const rel of relativeFiles) {
-				const candidate = join(root, pkg, rel);
-				if (existsSync(candidate)) {
-					return { path: candidate, dir: dirname(candidate) };
-				}
-			}
-		}
-	}
+	const candidate = findPiAiModule(searchRoots, fileName);
+	if (candidate) return { path: candidate, dir: dirname(candidate) };
 
 	const rootsSample = Array.from(searchRoots).slice(0, 10).join(", ");
 	throw new Error(`Cannot resolve ${fileName} (scanned roots: ${rootsSample || "none"})`);
 }
 
-function resolveOriginalCodexModulePath(): { path: string; dir: string } {
-	return resolvePhysicalPiAiModule("openai-codex-responses.js");
+async function loadPatchedPiAiStreams(options: {
+	fileName: string;
+	providerIds: string[];
+	streamOptions: CliproxyCodexStreamOptions;
+	patchSource: (source: string, providerIds: string[]) => string;
+}): Promise<CliproxyCodexStreams> {
+	const { fileName, providerIds, streamOptions, patchSource } = options;
+	const moduleName = fileName.endsWith(".js") ? fileName.slice(0, -3) : fileName;
+	const { path: originalPath, dir: originalDir } = resolvePhysicalPiAiModule(fileName);
+	const originalSource = readFileSync(originalPath, "utf8");
+	const patched = rewriteRelativeImports(patchSource(originalSource, providerIds), originalDir);
+
+	const hash = createHash("sha1").update(patched).digest("hex").slice(0, 16);
+	const cacheDir = join(tmpdir(), "pi-cliproxyapi-provider");
+	mkdirSync(cacheDir, { recursive: true });
+	const outPath = join(cacheDir, `${moduleName}-cpa-${hash}.mjs`);
+	if (!existsSync(outPath)) writeFileSync(outPath, patched, "utf8");
+
+	const mod = (await import(pathToFileURL(outPath).href)) as {
+		streamSimple?: CliproxyCodexStreamSimple;
+		stream?: CliproxyCodexStreamSimple;
+	};
+	if (typeof mod.streamSimple !== "function" || typeof mod.stream !== "function") {
+		throw new Error(`patched ${moduleName} module missing streamSimple/stream exports`);
+	}
+
+	return {
+		api: CLIPROXYAPI_CODEX_API,
+		streamSimple: wrapStreamSimpleForFast(mod.streamSimple, streamOptions.shouldUseFast),
+		stream: mod.stream,
+	};
 }
 
 export async function loadCliproxyCodexStreams(
 	providerIds: string[] = ["cliproxyapi"],
 	options: CliproxyCodexStreamOptions = {},
 ): Promise<CliproxyCodexStreams> {
-	const { path: originalPath, dir: originalDir } = resolveOriginalCodexModulePath();
-	const originalSource = readFileSync(originalPath, "utf8");
-	const patched = rewriteRelativeImports(patchCodexSource(originalSource, providerIds), originalDir);
-
-	const hash = createHash("sha1").update(patched).digest("hex").slice(0, 16);
-	const cacheDir = join(tmpdir(), "pi-cliproxyapi-provider");
-	mkdirSync(cacheDir, { recursive: true });
-	const outPath = join(cacheDir, `openai-codex-responses-cpa-${hash}.mjs`);
-	if (!existsSync(outPath)) {
-		writeFileSync(outPath, patched, "utf8");
-	}
-
-	const mod = (await import(pathToFileURL(outPath).href)) as {
-		streamSimple: CliproxyCodexStreamSimple;
-		stream: CliproxyCodexStreamSimple;
-	};
-
-	if (typeof mod.streamSimple !== "function" || typeof mod.stream !== "function") {
-		throw new Error("patched openai-codex-responses module missing streamSimple/stream exports");
-	}
-
-	const streamSimple = wrapStreamSimpleForFast(mod.streamSimple, options.shouldUseFast);
-
-	return {
-		api: CLIPROXYAPI_CODEX_API,
-		streamSimple,
-		stream: mod.stream,
-	};
+	return loadPatchedPiAiStreams({
+		fileName: "openai-codex-responses.js",
+		providerIds,
+		streamOptions: options,
+		patchSource: patchCodexSource,
+	});
 }
 
 export function patchResponsesSource(source: string, providerIds: string[]): string {
@@ -421,50 +413,40 @@ export function patchResponsesSource(source: string, providerIds: string[]): str
 	return src;
 }
 
-function resolveOriginalResponsesModulePath(): { path: string; dir: string } {
-	return resolvePhysicalPiAiModule("openai-responses.js");
-}
-
 export async function loadCliproxyResponsesStreams(
 	providerIds: string[] = ["cliproxyapi"],
 	options: CliproxyCodexStreamOptions = {},
 ): Promise<CliproxyCodexStreams> {
-	const { path: originalPath, dir: originalDir } = resolveOriginalResponsesModulePath();
-	const originalSource = readFileSync(originalPath, "utf8");
-	const patched = rewriteRelativeImports(patchResponsesSource(originalSource, providerIds), originalDir);
-
-	const hash = createHash("sha1").update(patched).digest("hex").slice(0, 16);
-	const cacheDir = join(tmpdir(), "pi-cliproxyapi-provider");
-	mkdirSync(cacheDir, { recursive: true });
-	const outPath = join(cacheDir, `openai-responses-cpa-${hash}.mjs`);
-	if (!existsSync(outPath)) {
-		writeFileSync(outPath, patched, "utf8");
-	}
-
-	const mod = (await import(pathToFileURL(outPath).href)) as {
-		streamSimple: CliproxyCodexStreamSimple;
-		stream: CliproxyCodexStreamSimple;
-	};
-
-	if (typeof mod.streamSimple !== "function" || typeof mod.stream !== "function") {
-		throw new Error("patched openai-responses module missing streamSimple/stream exports");
-	}
-
-	const streamSimple = wrapStreamSimpleForFast(mod.streamSimple, options.shouldUseFast);
-
-	return {
-		api: CLIPROXYAPI_CODEX_API,
-		streamSimple,
-		stream: mod.stream,
-	};
+	return loadPatchedPiAiStreams({
+		fileName: "openai-responses.js",
+		providerIds,
+		streamOptions: options,
+		patchSource: patchResponsesSource,
+	});
 }
 
 export function detectProtocolFromBaseUrl(baseUrl: string | undefined): ProtocolMode {
-	if (!baseUrl) return "openai-codex";
-	try {
-		const path = new URL(baseUrl).pathname.replace(/\/+$/, "");
-		return path === "/v1" || path.endsWith("/v1") ? "openai-responses" : "openai-codex";
-	} catch {
-		return "openai-codex";
-	}
+	return autoDetectProtocol(baseUrl ?? "");
+}
+
+export function createProtocolStreamDispatcher(
+	codexStreamSimple: CliproxyCodexStreamSimple,
+	responsesStreamSimple?: CliproxyCodexStreamSimple,
+	responsesUnavailableError?: unknown,
+): CliproxyCodexStreamSimple {
+	return (model, context, options) => {
+		if (detectProtocolFromBaseUrl(model.baseUrl) !== "openai-responses") {
+			return codexStreamSimple(model, context, options);
+		}
+		if (!responsesStreamSimple) {
+			const reason =
+				responsesUnavailableError === undefined
+					? ""
+					: `: ${responsesUnavailableError instanceof Error ? responsesUnavailableError.message : String(responsesUnavailableError)}`;
+			throw new Error(`openai-responses protocol is unavailable for this runtime${reason}`, {
+				cause: responsesUnavailableError,
+			});
+		}
+		return responsesStreamSimple(model, context, options);
+	};
 }

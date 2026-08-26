@@ -11,14 +11,24 @@ export interface ProactiveCompactionSettings {
 	reserveTokens: number;
 }
 
-export function extractCompactionSettings(manager: unknown): ProactiveCompactionSettings {
-	const fallback: ProactiveCompactionSettings = {
-		enabled: DEFAULT_COMPACTION_ENABLED,
-		reserveTokens: DEFAULT_COMPACTION_RESERVE_TOKENS,
+function normalizeCompactionSettings(settings?: {
+	enabled?: unknown;
+	reserveTokens?: unknown;
+}): ProactiveCompactionSettings {
+	return {
+		enabled: typeof settings?.enabled === "boolean" ? settings.enabled : DEFAULT_COMPACTION_ENABLED,
+		reserveTokens:
+			typeof settings?.reserveTokens === "number" &&
+			Number.isFinite(settings.reserveTokens) &&
+			settings.reserveTokens >= 0
+				? settings.reserveTokens
+				: DEFAULT_COMPACTION_RESERVE_TOKENS,
 	};
+}
 
+export function extractCompactionSettings(manager: unknown): ProactiveCompactionSettings {
 	if (!manager || typeof manager !== "object") {
-		return fallback;
+		return normalizeCompactionSettings();
 	}
 
 	// 1. Upstream Pi SettingsManager: manager.getCompactionSettings()
@@ -30,13 +40,7 @@ export function extractCompactionSettings(manager: unknown): ProactiveCompaction
 			const res = (
 				manager as { getCompactionSettings: () => { enabled?: boolean; reserveTokens?: number } }
 			).getCompactionSettings();
-			return {
-				enabled: typeof res?.enabled === "boolean" ? res.enabled : DEFAULT_COMPACTION_ENABLED,
-				reserveTokens:
-					typeof res?.reserveTokens === "number" && Number.isFinite(res.reserveTokens) && res.reserveTokens >= 0
-						? res.reserveTokens
-						: DEFAULT_COMPACTION_RESERVE_TOKENS,
-			};
+			return normalizeCompactionSettings(res);
 		} catch {
 			// fall through
 		}
@@ -48,13 +52,7 @@ export function extractCompactionSettings(manager: unknown): ProactiveCompaction
 			const getFn = (manager as { get: (key: string) => unknown }).get.bind(manager);
 			const rawEnabled = getFn("compaction.enabled");
 			const rawReserve = getFn("compaction.reserveTokens");
-			return {
-				enabled: typeof rawEnabled === "boolean" ? rawEnabled : DEFAULT_COMPACTION_ENABLED,
-				reserveTokens:
-					typeof rawReserve === "number" && Number.isFinite(rawReserve) && rawReserve >= 0
-						? rawReserve
-						: DEFAULT_COMPACTION_RESERVE_TOKENS,
-			};
+			return normalizeCompactionSettings({ enabled: rawEnabled, reserveTokens: rawReserve });
 		} catch {
 			// fall through
 		}
@@ -67,18 +65,10 @@ export function extractCompactionSettings(manager: unknown): ProactiveCompaction
 		(manager as { compaction?: unknown }).compaction !== null
 	) {
 		const compaction = (manager as { compaction: { enabled?: unknown; reserveTokens?: unknown } }).compaction;
-		return {
-			enabled: typeof compaction.enabled === "boolean" ? compaction.enabled : DEFAULT_COMPACTION_ENABLED,
-			reserveTokens:
-				typeof compaction.reserveTokens === "number" &&
-				Number.isFinite(compaction.reserveTokens) &&
-				compaction.reserveTokens >= 0
-					? compaction.reserveTokens
-					: DEFAULT_COMPACTION_RESERVE_TOKENS,
-		};
+		return normalizeCompactionSettings(compaction);
 	}
 
-	return fallback;
+	return normalizeCompactionSettings();
 }
 
 export async function safeReloadSettings(manager: unknown): Promise<void> {

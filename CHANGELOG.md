@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Dual-Protocol Support**: Auto-detects and supports the standard OpenAI Responses API (`openai-responses`) over HTTP SSE for third-party proxy/relay stations, alongside the official ChatGPT Codex backend protocol (`openai-codex`). (#14)
+- **Dual-Protocol Support**: Auto-detects and supports the standard OpenAI Responses API (`openai-responses`) over HTTP SSE for third-party proxy/relay stations, alongside the official ChatGPT Codex backend protocol (`openai-codex`).
 - **Protocol Configuration**: Added `protocol` field (`"openai-codex" | "openai-responses"`) to `cliproxyapi.json` and `CLIPROXYAPI_PROTOCOL` environment variable override.
 - **Physical Module Resolution Pipeline**: Implemented a comprehensive multi-root probe pipeline for locating `@earendil-works/pi-ai` distribution files across pi 0.84.3+ bundled runtime, OMP CLI, NVM, and global installations. (#14)
 - **Unit Test Coverage**: Added dedicated test suites for runtime stream patching, module resolution, and cache protocol awareness.
@@ -19,37 +19,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Relay API WebSocket Errors**: Resolved `WebSocket error` and retry failures when connecting to third-party proxy stations that only support HTTP SSE at `/v1/responses`.
 - **Cache Protocol Consistency**: Fixed model cache lookup to be protocol-aware, preventing endpoint collisions between Codex (`/backend-api/`) and Relay API (`/v1/`) modes.
 - **pi 0.84.3 Bundled Runtime Crash**: Fixed `Cannot resolve openai-codex-responses.js (tried: none)` failure caused by virtual module loader bypass in pi 0.84.3 bundled mode. (#14)
+- **Responses Transport Failure Reporting**: Requests configured for `openai-responses` now fail with a protocol-specific error when the Responses transport cannot be loaded instead of incorrectly falling back to the Codex WebSocket transport.
 
-## [1.4.14] - 2026-03-24
+### Changed
+- Consolidated protocol detection, physical module probing, and patched stream loading to keep Codex and Responses behavior aligned.
+
+## [1.4.14] - 2026-08-24
 
 ### Fixed
 - Resolved bundled pi-ai module path resolution under packaged CLI environments.
+
+## [1.4.13] - 2026-08-06
+
+### Fixed
 - Prevented stale TPS context references after session replacement or reload.
+
+## [1.4.12] - 2026-08-03
+
+### Fixed
 - Styled paused footer labels with orange indicator color.
+
+## [1.4.11] - 2026-08-03
 
 ### Added
 - Provider request pause and resume controls (`/pause` and `/continue`).
 
-## [1.4.13] - 2026-03-20
+## [1.4.10] - 2026-07-27
+
+### Reliability
+- Added automatic retry logic for transient Codex stream errors.
 
 ### Performance
 - Coordinated model catalog refreshes with cache-aware startup updates.
 - Added cached `models.dev` pricing fallbacks for offline and resilient startup.
 - Fixed Fast pricing refresh consistency.
 
-## [1.4.10] - 2026-03-15
+## [1.4.9] - 2026-07-25
 
 ### Reliability
-- Added automatic retry logic for transient Codex stream network errors and closed connections.
-- Improved WebSocket reconnection fallback handling.
+- Retried Codex requests after closed network connections.
 
-## [1.4.8] - 2026-03-10
+## [1.4.8] - 2026-07-24
 
 ### Compatibility
 - Upgraded compatibility for pi `0.82.0`+.
+
+## [1.4.7] - 2026-07-21
+
+### Performance
+- Added remote model catalog caching and quieter cache-aware startup updates.
+
+### Reliability
+- Improved WebSocket reconnection fallback handling.
+
+## [1.4.2] - 2026-07-17
+
+### Changed
 - Streamlined `/login` OAuth multi-field configuration workflow.
 
-## [1.4.0] - 2026-03-01
+## [1.4.0] - 2026-07-16
 
 ### Added
 - Added global Fast mode toggle (`/fast`) for catalog-supported models.
