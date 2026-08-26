@@ -5,8 +5,10 @@ import { type Api, type AssistantMessage, isContextOverflow, type Model } from "
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	extractCompactionSettings,
 	PROACTIVE_COMPACTION_ERROR_PREFIX,
 	ProactiveCompactionController,
+	safeReloadSettings,
 	shouldScheduleProactiveCompaction,
 } from "../extensions/auto-compact.ts";
 import type { CliproxyCodexStreamSimple } from "../extensions/codex-stream.ts";
@@ -149,5 +151,191 @@ describe("proactive compaction controller", () => {
 
 		await handlers.get("turn_end")?.({ message, toolResults: [{}] }, ctx);
 		expect(wrapped(model, { messages: [] })).toBe(baseResult);
+	});
+
+	it("supports OMP environment where SettingsManager.create returns a Promise with reloadFromDisk", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-omp-agent-"));
+		const cwd = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-omp-cwd-"));
+		tempDirs.push(agentDir, cwd);
+
+		let reloadFromDiskCalled = false;
+		const ompSettingsState: Record<string, unknown> = {
+			"compaction.enabled": true,
+			"compaction.reserveTokens": RESERVE_TOKENS,
+		};
+
+		const mockOmpSettings = {
+			get(key: string) {
+				return ompSettingsState[key];
+			},
+			async reloadFromDisk() {
+				reloadFromDiskCalled = true;
+			},
+		};
+
+		const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
+		const pi = {
+			on: (event: string, handler: (event: any, ctx: ExtensionContext) => unknown) => handlers.set(event, handler),
+		} as unknown as ExtensionAPI;
+		const controller = new ProactiveCompactionController(agentDir, "cliproxyapi");
+		controller.register(pi);
+
+		// Directly inject the OMP Promise simulation as if SettingsManager.create returned a Promise
+		(controller as any).settingsManager = Promise.resolve(mockOmpSettings);
+
+		const model = {
+			id: "gpt-5.6-sol",
+			provider: "cliproxyapi",
+			api: "openai-codex-responses",
+			contextWindow: CONTEXT_WINDOW,
+		} as Model<Api>;
+		const ctx = {
+			cwd,
+			model,
+			isProjectTrusted: () => false,
+			getContextUsage: () => ({ tokens: THRESHOLD + 1, contextWindow: CONTEXT_WINDOW, percent: 82.4 }),
+		} as unknown as ExtensionContext;
+
+		const baseResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		const baseStream: CliproxyCodexStreamSimple = () => baseResult;
+		const wrapped = controller.wrapStreamSimple(baseStream);
+
+		// Trigger turn_end in OMP environment - must NOT throw TypeError: settingsManager.reload is not a function
+		await handlers.get("turn_end")?.({ message: assistantMessage(THRESHOLD + 1), toolResults: [{}] }, ctx);
+
+		expect(reloadFromDiskCalled).toBe(true);
+		expect(controller.getCompactionSettings()).toEqual({
+			enabled: true,
+			reserveTokens: RESERVE_TOKENS,
+		});
+
+		const proactiveStream = wrapped(model, { messages: [] });
+		const error = await proactiveStream.result();
+		expect(error.stopReason).toBe("error");
+		expect(error.errorMessage).toBe(`${PROACTIVE_COMPACTION_ERROR_PREFIX} (${THRESHOLD + 1} > ${THRESHOLD})`);
+	});
+
+	it("gracefully handles missing or failing settings manager", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-fallback-agent-"));
+		const cwd = mkdtempSync(join(tmpdir(), "pi-cliproxyapi-fallback-cwd-"));
+		tempDirs.push(agentDir, cwd);
+
+		const handlers = new Map<string, (event: any, ctx: ExtensionContext) => unknown>();
+		const pi = {
+			on: (event: string, handler: (event: any, ctx: ExtensionContext) => unknown) => handlers.set(event, handler),
+		} as unknown as ExtensionAPI;
+		const controller = new ProactiveCompactionController(agentDir, "cliproxyapi");
+		controller.register(pi);
+
+		(controller as any).settingsManager = undefined;
+
+		const model = {
+			id: "gpt-5.6-sol",
+			provider: "cliproxyapi",
+			api: "openai-codex-responses",
+			contextWindow: CONTEXT_WINDOW,
+		} as Model<Api>;
+		const ctx = {
+			cwd,
+			model,
+			isProjectTrusted: () => false,
+			getContextUsage: () => ({ tokens: THRESHOLD + 1, contextWindow: CONTEXT_WINDOW, percent: 82.4 }),
+		} as unknown as ExtensionContext;
+
+		await handlers.get("turn_end")?.({ message: assistantMessage(THRESHOLD + 1), toolResults: [{}] }, ctx);
+		expect(controller.getCompactionSettings()).toEqual({
+			enabled: true,
+			reserveTokens: 16384,
+		});
+	});
+});
+
+describe("extractCompactionSettings and safeReloadSettings helpers", () => {
+	it("extracts settings from upstream Pi SettingsManager-like object", () => {
+		const manager = {
+			getCompactionSettings() {
+				return { enabled: true, reserveTokens: 32000, keepRecentTokens: 10000 };
+			},
+		};
+		expect(extractCompactionSettings(manager)).toEqual({
+			enabled: true,
+			reserveTokens: 32000,
+		});
+	});
+
+	it("extracts settings from OMP Settings-like object with .get()", () => {
+		const manager = {
+			get(key: string) {
+				if (key === "compaction.enabled") return false;
+				if (key === "compaction.reserveTokens") return 40000;
+				return undefined;
+			},
+		};
+		expect(extractCompactionSettings(manager)).toEqual({
+			enabled: false,
+			reserveTokens: 40000,
+		});
+	});
+
+	it("extracts settings from plain settings object", () => {
+		const manager = {
+			compaction: {
+				enabled: false,
+				reserveTokens: 24000,
+			},
+		};
+		expect(extractCompactionSettings(manager)).toEqual({
+			enabled: false,
+			reserveTokens: 24000,
+		});
+	});
+
+	it("falls back to default settings for null, undefined, or invalid objects", () => {
+		expect(extractCompactionSettings(null)).toEqual({
+			enabled: true,
+			reserveTokens: 16384,
+		});
+		expect(extractCompactionSettings(undefined)).toEqual({
+			enabled: true,
+			reserveTokens: 16384,
+		});
+		expect(extractCompactionSettings({})).toEqual({
+			enabled: true,
+			reserveTokens: 16384,
+		});
+		expect(extractCompactionSettings({ compaction: { reserveTokens: "invalid" } })).toEqual({
+			enabled: true,
+			reserveTokens: 16384,
+		});
+	});
+
+	it("safeReloadSettings calls reload or reloadFromDisk when present, and ignores errors", async () => {
+		let reloadCalled = false;
+		await safeReloadSettings({
+			async reload() {
+				reloadCalled = true;
+			},
+		});
+		expect(reloadCalled).toBe(true);
+
+		let reloadFromDiskCalled = false;
+		await safeReloadSettings({
+			async reloadFromDisk() {
+				reloadFromDiskCalled = true;
+			},
+		});
+		expect(reloadFromDiskCalled).toBe(true);
+
+		// Does not throw when method throws or is missing
+		await expect(
+			safeReloadSettings({
+				reload() {
+					throw new Error("disk error");
+				},
+			}),
+		).resolves.toBeUndefined();
+
+		await expect(safeReloadSettings(null)).resolves.toBeUndefined();
+		await expect(safeReloadSettings({})).resolves.toBeUndefined();
 	});
 });

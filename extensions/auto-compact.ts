@@ -3,10 +3,108 @@ import { type ExtensionAPI, SettingsManager } from "@earendil-works/pi-coding-ag
 import type { CliproxyCodexStreamSimple } from "./codex-stream.ts";
 
 export const PROACTIVE_COMPACTION_ERROR_PREFIX = "context_length_exceeded: proactive compaction threshold reached";
+export const DEFAULT_COMPACTION_ENABLED = true;
+export const DEFAULT_COMPACTION_RESERVE_TOKENS = 16384;
 
 export interface ProactiveCompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
+}
+
+export function extractCompactionSettings(manager: unknown): ProactiveCompactionSettings {
+	const fallback: ProactiveCompactionSettings = {
+		enabled: DEFAULT_COMPACTION_ENABLED,
+		reserveTokens: DEFAULT_COMPACTION_RESERVE_TOKENS,
+	};
+
+	if (!manager || typeof manager !== "object") {
+		return fallback;
+	}
+
+	// 1. Upstream Pi SettingsManager: manager.getCompactionSettings()
+	if (
+		"getCompactionSettings" in manager &&
+		typeof (manager as { getCompactionSettings?: unknown }).getCompactionSettings === "function"
+	) {
+		try {
+			const res = (
+				manager as { getCompactionSettings: () => { enabled?: boolean; reserveTokens?: number } }
+			).getCompactionSettings();
+			return {
+				enabled: typeof res?.enabled === "boolean" ? res.enabled : DEFAULT_COMPACTION_ENABLED,
+				reserveTokens:
+					typeof res?.reserveTokens === "number" && Number.isFinite(res.reserveTokens) && res.reserveTokens >= 0
+						? res.reserveTokens
+						: DEFAULT_COMPACTION_RESERVE_TOKENS,
+			};
+		} catch {
+			// fall through
+		}
+	}
+
+	// 2. OMP Settings instance: manager.get("compaction.enabled"), manager.get("compaction.reserveTokens")
+	if ("get" in manager && typeof (manager as { get?: unknown }).get === "function") {
+		try {
+			const getFn = (manager as { get: (key: string) => unknown }).get.bind(manager);
+			const rawEnabled = getFn("compaction.enabled");
+			const rawReserve = getFn("compaction.reserveTokens");
+			return {
+				enabled: typeof rawEnabled === "boolean" ? rawEnabled : DEFAULT_COMPACTION_ENABLED,
+				reserveTokens:
+					typeof rawReserve === "number" && Number.isFinite(rawReserve) && rawReserve >= 0
+						? rawReserve
+						: DEFAULT_COMPACTION_RESERVE_TOKENS,
+			};
+		} catch {
+			// fall through
+		}
+	}
+
+	// 3. Plain settings object: { compaction: { enabled, reserveTokens } }
+	if (
+		"compaction" in manager &&
+		typeof (manager as { compaction?: unknown }).compaction === "object" &&
+		(manager as { compaction?: unknown }).compaction !== null
+	) {
+		const compaction = (manager as { compaction: { enabled?: unknown; reserveTokens?: unknown } }).compaction;
+		return {
+			enabled: typeof compaction.enabled === "boolean" ? compaction.enabled : DEFAULT_COMPACTION_ENABLED,
+			reserveTokens:
+				typeof compaction.reserveTokens === "number" &&
+				Number.isFinite(compaction.reserveTokens) &&
+				compaction.reserveTokens >= 0
+					? compaction.reserveTokens
+					: DEFAULT_COMPACTION_RESERVE_TOKENS,
+		};
+	}
+
+	return fallback;
+}
+
+export async function safeReloadSettings(manager: unknown): Promise<void> {
+	if (!manager || typeof manager !== "object") {
+		return;
+	}
+
+	// Upstream Pi: manager.reload()
+	if ("reload" in manager && typeof (manager as { reload?: unknown }).reload === "function") {
+		try {
+			await (manager as { reload: () => Promise<void> | void }).reload();
+		} catch {
+			// ignore reload errors
+		}
+		return;
+	}
+
+	// OMP: manager.reloadFromDisk()
+	if ("reloadFromDisk" in manager && typeof (manager as { reloadFromDisk?: unknown }).reloadFromDisk === "function") {
+		try {
+			await (manager as { reloadFromDisk: () => Promise<void> | void }).reloadFromDisk();
+		} catch {
+			// ignore reload errors
+		}
+		return;
+	}
 }
 
 export function shouldScheduleProactiveCompaction(
@@ -65,7 +163,8 @@ export function createProactiveCompactionStream(model: Model<Api>, contextTokens
 }
 
 export class ProactiveCompactionController {
-	private settingsManager: SettingsManager | undefined;
+	private settingsManager: unknown | undefined;
+	private cachedCompactionSettings: ProactiveCompactionSettings | undefined;
 	private pending: { modelKey: string; contextTokens: number; threshold: number } | undefined;
 
 	constructor(
@@ -74,15 +173,35 @@ export class ProactiveCompactionController {
 	) {}
 
 	register(pi: ExtensionAPI): void {
-		pi.on("session_start", (_event, ctx) => {
-			this.settingsManager = SettingsManager.create(ctx.cwd, this.agentDir, {
-				projectTrusted: ctx.isProjectTrusted(),
-			});
+		pi.on("session_start", async (_event, ctx) => {
 			this.pending = undefined;
+			try {
+				if (typeof SettingsManager?.create === "function") {
+					const created = SettingsManager.create(ctx.cwd, this.agentDir, {
+						projectTrusted: ctx.isProjectTrusted(),
+					});
+					const resolved = created instanceof Promise ? await created : created;
+					this.settingsManager = resolved;
+					this.cachedCompactionSettings = extractCompactionSettings(resolved);
+				} else {
+					this.settingsManager = undefined;
+					this.cachedCompactionSettings = {
+						enabled: DEFAULT_COMPACTION_ENABLED,
+						reserveTokens: DEFAULT_COMPACTION_RESERVE_TOKENS,
+					};
+				}
+			} catch {
+				this.settingsManager = undefined;
+				this.cachedCompactionSettings = {
+					enabled: DEFAULT_COMPACTION_ENABLED,
+					reserveTokens: DEFAULT_COMPACTION_RESERVE_TOKENS,
+				};
+			}
 		});
 
 		pi.on("session_shutdown", () => {
 			this.settingsManager = undefined;
+			this.cachedCompactionSettings = undefined;
 			this.pending = undefined;
 		});
 
@@ -103,12 +222,22 @@ export class ProactiveCompactionController {
 				return;
 			}
 
-			const settingsManager = this.settingsManager;
-			if (!settingsManager) {
-				return;
+			let settingsManager = this.settingsManager;
+			if (settingsManager instanceof Promise) {
+				try {
+					settingsManager = await settingsManager;
+					this.settingsManager = settingsManager;
+				} catch {
+					settingsManager = undefined;
+				}
 			}
-			await settingsManager.reload();
-			const settings = settingsManager.getCompactionSettings();
+
+			if (settingsManager) {
+				await safeReloadSettings(settingsManager);
+			}
+			this.cachedCompactionSettings = extractCompactionSettings(settingsManager);
+
+			const settings = this.cachedCompactionSettings;
 			const contextTokens = ctx.getContextUsage()?.tokens;
 			if (contextTokens === null || contextTokens === undefined) {
 				return;
@@ -126,7 +255,10 @@ export class ProactiveCompactionController {
 	}
 
 	getCompactionSettings(): ProactiveCompactionSettings | undefined {
-		return this.settingsManager?.getCompactionSettings();
+		if (this.settingsManager && !(this.settingsManager instanceof Promise)) {
+			return extractCompactionSettings(this.settingsManager);
+		}
+		return this.cachedCompactionSettings ?? extractCompactionSettings(undefined);
 	}
 
 	wrapStreamSimple(streamSimple: CliproxyCodexStreamSimple): CliproxyCodexStreamSimple {
