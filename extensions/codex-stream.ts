@@ -12,11 +12,12 @@
  * upstream protocol fixes without vendoring 1200+ lines.
  */
 
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createRequire, isBuiltin } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { autoDetectProtocol, type ProtocolMode } from "./lib.ts";
@@ -124,6 +125,82 @@ export function isOmpRuntimeEntry(entryPath: string | undefined): boolean {
 		// Tests and embedded runtimes may provide a non-filesystem entry label.
 	}
 	return resolved.replaceAll("\\", "/").includes("/node_modules/@oh-my-pi/pi-coding-agent/");
+}
+
+export function isBunEmbeddedRuntimeEntry(entryPath: string | undefined): boolean {
+	return entryPath?.replaceAll("\\", "/").includes("/$bunfs/") ?? false;
+}
+
+interface EmbeddedBunBuildPluginBuilder {
+	onResolve(options: { filter: RegExp }, callback: (args: { path: string }) => { path: string }): void;
+}
+
+interface EmbeddedBunBuildOptions {
+	entrypoints: string[];
+	outdir: string;
+	target: "bun";
+	format: "esm";
+	naming: string;
+	write: false;
+	plugins?: Array<{
+		name: string;
+		setup(build: EmbeddedBunBuildPluginBuilder): void;
+	}>;
+}
+
+interface EmbeddedBunBuildResult {
+	success: boolean;
+	logs?: Array<{ message?: string } | string>;
+	outputs?: Array<{ text(): Promise<string> }>;
+}
+
+type EmbeddedBunBuild = (options: EmbeddedBunBuildOptions) => Promise<EmbeddedBunBuildResult>;
+
+export async function preparePatchedModuleForImport(options: {
+	entryPath: string;
+	outputPath: string;
+	embeddedBun: boolean;
+	build?: EmbeddedBunBuild;
+}): Promise<string> {
+	const { entryPath, outputPath, embeddedBun } = options;
+	if (!embeddedBun) return pathToFileURL(entryPath).href;
+	if (existsSync(outputPath)) return pathToFileURL(outputPath).href;
+
+	const runtimeBun = (globalThis as unknown as { Bun?: { build?: EmbeddedBunBuild } }).Bun;
+	const build = options.build ?? (runtimeBun?.build ? (buildOptions) => runtimeBun.build!(buildOptions) : undefined);
+	if (!build) {
+		throw new Error("embedded Bun runtime does not expose Bun.build");
+	}
+
+	// Bundling removes transitive bare imports that embedded Bun cannot resolve from physical package files.
+	const result = await build({
+		entrypoints: [entryPath],
+		outdir: dirname(outputPath),
+		target: "bun",
+		format: "esm",
+		naming: basename(outputPath),
+		write: false,
+		plugins: [
+			{
+				name: "physical-file-url",
+				setup(builder) {
+					builder.onResolve({ filter: /^file:/ }, (args) => ({ path: fileURLToPath(args.path) }));
+				},
+			},
+		],
+	});
+	if (!result.success) {
+		const details = result.logs
+			?.map((log) => (typeof log === "string" ? log : log.message))
+			.filter((message): message is string => Boolean(message))
+			.join("; ");
+		throw new Error(`failed to bundle patched module${details ? `: ${details}` : ""}`);
+	}
+	const bundledSource = await result.outputs?.[0]?.text();
+	if (!bundledSource) throw new Error("embedded Bun build returned no output source");
+	writeFileSync(outputPath, bundledSource, "utf8");
+	// Load the first build in memory because Bun snapshots the temp directory after the first dynamic import.
+	return `data:text/javascript;base64,${Buffer.from(bundledSource).toString("base64")}`;
 }
 
 async function loadHostCompatibleStreams(
@@ -267,31 +344,34 @@ export function resolveCodexModuleFromNodeEntry(
 }
 
 export function resolvePhysicalPiAiModule(fileName: string): { path: string; dir: string } {
-	// 1. Try native import.meta.resolve subpath & package main
-	try {
-		const subpath = import.meta.resolve(`@earendil-works/pi-ai/api/${fileName}`);
-		const subpathFile = fileURLToPath(subpath);
-		if (existsSync(subpathFile)) {
-			return { path: subpathFile, dir: dirname(subpathFile) };
-		}
-	} catch {
-		// ignore
-	}
-
-	try {
-		const main = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"));
-		const distDir = dirname(main);
-		for (const rel of [join("api", fileName), fileName]) {
-			const candidate = join(distDir, rel);
-			if (existsSync(candidate)) {
-				return { path: candidate, dir: dirname(candidate) };
+	// Bun's embedded executable filesystem can block indefinitely in import.meta.resolve.
+	// Its virtual entry cannot resolve packages anyway, so use deterministic filesystem probes.
+	if (!isBunEmbeddedRuntimeEntry(process.argv[1])) {
+		try {
+			const subpath = import.meta.resolve(`@earendil-works/pi-ai/api/${fileName}`);
+			const subpathFile = fileURLToPath(subpath);
+			if (existsSync(subpathFile)) {
+				return { path: subpathFile, dir: dirname(subpathFile) };
 			}
+		} catch {
+			// ignore
 		}
-	} catch {
-		// ignore
+
+		try {
+			const main = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai"));
+			const distDir = dirname(main);
+			for (const rel of [join("api", fileName), fileName]) {
+				const candidate = join(distDir, rel);
+				if (existsSync(candidate)) {
+					return { path: candidate, dir: dirname(candidate) };
+				}
+			}
+		} catch {
+			// ignore
+		}
 	}
 
-	// 2. Build comprehensive search roots from process entry, cwd, execPath, homedir
+	// Build comprehensive search roots from process entry, cwd, execPath, homedir.
 	const searchRoots = new Set<string>();
 
 	// Process entrypoint (e.g. pi CLI entry point)
@@ -374,8 +454,13 @@ async function loadPatchedPiAiStreams(options: {
 	mkdirSync(cacheDir, { recursive: true });
 	const outPath = join(cacheDir, `${moduleName}-cpa-${hash}.mjs`);
 	if (!existsSync(outPath)) writeFileSync(outPath, patched, "utf8");
+	const importSpecifier = await preparePatchedModuleForImport({
+		entryPath: outPath,
+		outputPath: join(cacheDir, `${moduleName}-cpa-${hash}-bundled.mjs`),
+		embeddedBun: isBunEmbeddedRuntimeEntry(process.argv[1]),
+	});
 
-	const mod = (await import(pathToFileURL(outPath).href)) as {
+	const mod = (await import(importSpecifier)) as {
 		streamSimple?: CliproxyCodexStreamSimple;
 		stream?: CliproxyCodexStreamSimple;
 	};

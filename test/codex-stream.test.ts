@@ -1,5 +1,6 @@
+import { Buffer } from "node:buffer";
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, unlinkSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,10 +12,12 @@ import {
 	createHostCompatibleStreams,
 	createProtocolStreamDispatcher,
 	detectProtocolFromBaseUrl,
+	isBunEmbeddedRuntimeEntry,
 	isOmpRuntimeEntry,
 	loadCliproxyCodexStreams,
 	loadCliproxyResponsesStreams,
 	patchResponsesSource,
+	preparePatchedModuleForImport,
 	resolvePhysicalPiAiModule,
 	withPriorityServiceTier,
 } from "../extensions/codex-stream.ts";
@@ -30,6 +33,79 @@ describe("isOmpRuntimeEntry", () => {
 		expect(isOmpRuntimeEntry("/opt/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js")).toBe(true);
 		expect(isOmpRuntimeEntry("/opt/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js")).toBe(false);
 		expect(isOmpRuntimeEntry(undefined)).toBe(false);
+	});
+});
+
+describe("isBunEmbeddedRuntimeEntry", () => {
+	it("identifies OMP's virtual Bun executable path", () => {
+		expect(isBunEmbeddedRuntimeEntry("/$bunfs/root/omp-darwin-arm64")).toBe(true);
+		expect(isBunEmbeddedRuntimeEntry("C:\\$bunfs\\root\\omp-windows-x64.exe")).toBe(true);
+		expect(isBunEmbeddedRuntimeEntry("/opt/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js")).toBe(false);
+		expect(isBunEmbeddedRuntimeEntry("/Users/example/.bun/bin/omp")).toBe(false);
+		expect(isBunEmbeddedRuntimeEntry(undefined)).toBe(false);
+	});
+});
+
+describe("preparePatchedModuleForImport", () => {
+	it("bundles patched modules before importing them in embedded Bun runtimes", async () => {
+		const cacheDir = mkdtempSync(join(tmpdir(), "pi-cpa-embedded-bundle-test-"));
+		const entryPath = join(cacheDir, "patched.mjs");
+		const outputPath = join(cacheDir, "patched-bundled.mjs");
+		writeFileSync(entryPath, 'export { parseStreamingJson } from "file:///tmp/json-parse.js";\n', "utf8");
+
+		let receivedOptions: Record<string, unknown> | undefined;
+		try {
+			const resolved = await preparePatchedModuleForImport({
+				entryPath,
+				outputPath,
+				embeddedBun: true,
+				build: async (options) => {
+					receivedOptions = options as unknown as Record<string, unknown>;
+					const plugin = options.plugins?.[0];
+					let resolver: ((args: { path: string }) => { path: string }) | undefined;
+					plugin?.setup({
+						onResolve: (_options, callback) => {
+							resolver = callback;
+						},
+					});
+					expect(resolver?.({ path: "file:///tmp/json-parse.js" })).toEqual({ path: "/tmp/json-parse.js" });
+					return {
+						success: true,
+						logs: [],
+						outputs: [{ text: async () => "export const bundled = true;\n" }],
+					};
+				},
+			});
+
+			expect(resolved).toBe(
+				`data:text/javascript;base64,${Buffer.from("export const bundled = true;\n").toString("base64")}`,
+			);
+			expect(readFileSync(outputPath, "utf8")).toBe("export const bundled = true;\n");
+			expect(receivedOptions).toMatchObject({
+				entrypoints: [entryPath],
+				outdir: cacheDir,
+				target: "bun",
+				format: "esm",
+				naming: "patched-bundled.mjs",
+				write: false,
+			});
+		} finally {
+			rmSync(cacheDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the generated module unchanged outside embedded Bun runtimes", async () => {
+		const build = async () => {
+			throw new Error("build should not run");
+		};
+		await expect(
+			preparePatchedModuleForImport({
+				entryPath: "/tmp/patched.mjs",
+				outputPath: "/tmp/patched-bundled.mjs",
+				embeddedBun: false,
+				build,
+			}),
+		).resolves.toBe("file:///tmp/patched.mjs");
 	});
 });
 
