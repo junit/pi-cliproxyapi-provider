@@ -121,14 +121,25 @@ Resolution order for connection settings:
 
 The Fast preference resolves separately as `CLIPROXYAPI_FAST` → `cliproxyapi.json` → `false`.
 
+### Pi transport preference
+
+The plugin does not define or override a separate transport setting. For `openai-codex`, Pi's global `transport` preference is forwarded unchanged to the Codex stream implementation.
+
+| Pi setting | Pi-to-CLIProxyAPI behavior |
+| ------- | --------- |
+| `sse` | Uses the Codex SSE transport. |
+| `websocket` | Prefers WebSocket without cached-context deltas. Pi may fall back to Codex SSE if setup fails before response events begin. |
+| `websocket-cached` | Prefers WebSocket with session continuation and cached-context deltas, with the same pre-stream SSE fallback. |
+| `auto` | Defers selection to Pi. In Pi 0.84.3 this uses the cached WebSocket path with the same pre-stream SSE fallback. |
+
+`openai-responses` only exposes the standard HTTP SSE transport, so WebSocket preferences do not apply in that protocol mode. Pi's transport setting controls only the downstream Pi-to-CLIProxyAPI connection; CLIProxyAPI independently chooses the upstream transport for each selected credential.
+
 ### Protocol modes & baseUrl normalization
 
-The plugin supports two protocols:
+The plugin supports two downstream protocols. For a local CLIProxyAPI instance, `openai-codex` keeps Pi's WebSocket transport while CLIProxyAPI selects the credential and independently chooses that credential's upstream WebSocket or HTTP executor. Direct third-party relay endpoints can use `openai-responses` when they only expose the standard `/v1/responses` API.
 
-- **`openai-codex`** (default for `host:port` or `/backend-api`): Uses the patched ChatGPT Codex backend protocol (`/backend-api/codex/responses`) with the existing persistent WebSocket transport.
-- **`openai-responses`** (auto-detected for URLs ending in `/v1`): Uses the standard OpenAI Responses API protocol (`/v1/responses`) over HTTP SSE. Use it for relay endpoints that do not expose the Codex backend protocol.
-
-Migration note: previous versions normalized a `/v1` base URL to the Codex backend. `/v1` now auto-selects `openai-responses`; set `"protocol": "openai-codex"` to preserve the previous behavior.
+- **`openai-codex`** (default for `host:port` or `/backend-api`): Uses the CLIProxyAPI Codex backend protocol (`/backend-api/codex/responses`) with WebSocket and Codex SSE fallback. A downstream WebSocket does not require every selected upstream credential to support WebSocket; CLIProxyAPI performs per-credential transport selection.
+- **`openai-responses`** (auto-detected for URLs ending in `/v1`): Uses the standard OpenAI Responses API protocol (`/v1/responses`) over HTTP SSE. Use it for direct relay endpoints or an explicit operator override, not as a model-wide capability cache for a mixed CLIProxyAPI pool.
 
 | Input / Mode | Protocol | Inference baseUrl | Models URL |
 | ------- | --------- | ------------------- | ------------ |
