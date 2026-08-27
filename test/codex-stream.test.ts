@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { Api, Context, Model } from "@earendil-works/pi-ai";
+import type { Api, Context, Model, SimpleStreamOptions, Transport } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
 	applyFastPayloadHook,
@@ -104,6 +104,35 @@ describe("runtime module loading", () => {
 		expect(receivedModel?.api).toBe("openai-codex-responses");
 		expect(receivedModel?.compat).toEqual({ supportsImageDetailOriginal: true });
 		expect(model.api).toBe("cliproxyapi-codex-responses");
+	});
+
+	it.each([
+		"sse",
+		"websocket",
+		"websocket-cached",
+		"auto",
+	] satisfies Transport[])("preserves Pi transport preference %s through provider dispatch", (transport) => {
+		const streamResult = {} as ReturnType<CliproxyCodexStreamSimple>;
+		let receivedOptions: SimpleStreamOptions | undefined;
+		const streams = createHostCompatibleStreams(
+			{
+				buildModel: (spec) => spec as unknown as Model<Api>,
+				streamSimple: (_model, _context, options) => {
+					receivedOptions = options;
+					return streamResult;
+				},
+			},
+			"openai-codex-responses",
+		);
+		if (!streams) throw new Error("host-compatible streams unavailable");
+
+		const dispatcher = createProtocolStreamDispatcher(streams.streamSimple);
+		const options = { transport, sessionId: "transport-forwarding-test" } satisfies SimpleStreamOptions;
+		const result = dispatcher(testModel("http://127.0.0.1:8317/backend-api/"), testContext, options);
+
+		expect(result).toBe(streamResult);
+		expect(receivedOptions).toBe(options);
+		expect(receivedOptions?.transport).toBe(transport);
 	});
 
 	it("falls back unless the host exposes both streamSimple and buildModel", () => {

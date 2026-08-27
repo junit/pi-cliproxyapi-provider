@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Consolidated protocol detection, physical module probing, and patched stream loading to keep Codex and Responses behavior aligned.
+- Documented and regression-tested pass-through of Pi's `sse`, `websocket`, `websocket-cached`, and `auto` transport preferences without adding a plugin-specific transport override.
 
 ## [1.4.14] - 2026-08-24
 
